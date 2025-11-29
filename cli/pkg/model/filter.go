@@ -16,6 +16,8 @@ type Filter struct {
 	Albums []string
 	// when email is provided, only files shared with that email are exported
 	Emails []string
+	// when jobs is provided, amount of jobs to use for downloading in exports
+	Jobs int64
 	// for the listed album names, files in these albums are excluded
 	ExcludeAlbums []string
 }

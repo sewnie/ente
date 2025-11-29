@@ -10,6 +10,7 @@ import (
 	"github.com/ente-io/cli/pkg/model"
 	"github.com/ente-io/cli/pkg/model/export"
 	"github.com/ente-io/cli/utils"
+	"golang.org/x/sync/errgroup"
 	"log"
 	"os"
 	"path/filepath"
@@ -42,7 +43,11 @@ func (c *ClICtrl) syncFiles(ctx context.Context, account model.Account) error {
 	log.Println("total entries", len(entries))
 	model.SortAlbumFileEntry(entries)
 	defer utils.TimeTrack(time.Now(), "process_files")
-	var albumDiskInfo *albumDiskInfo
+
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.SetLimit(12)
+	albumInfoCache := make(map[int64]*albumDiskInfo)
+
 	for i, albumFileEntry := range entries {
 		if albumFileEntry.SyncedLocally {
 			continue
@@ -63,41 +68,20 @@ func (c *ClICtrl) syncFiles(ctx context.Context, account model.Account) error {
 			continue
 		}
 
-		if albumDiskInfo == nil || albumDiskInfo.AlbumMeta.ID != albumInfo.ID {
+		albumDiskInfo, ok := albumInfoCache[albumFileEntry.AlbumID]
+		if !ok {
 			albumDiskInfo, err = readFilesMetadata(exportRoot, albumInfo)
 			if err != nil {
 				return err
 			}
+			albumInfoCache[albumFileEntry.AlbumID] = albumDiskInfo
 		}
+
 		fileBytes, err := c.GetValue(ctx, model.RemoteFiles, []byte(fmt.Sprintf("%d", albumFileEntry.FileID)))
 		if err != nil {
 			return err
 		}
-		if fileBytes != nil {
-			var existingEntry *model.RemoteFile
-			err = json.Unmarshal(fileBytes, &existingEntry)
-			if err != nil {
-				return err
-			}
-			log.Printf("[%d/%d] Sync %s for album %s", i, len(entries), existingEntry.GetTitle(), albumInfo.AlbumName)
-			err = c.downloadEntry(ctx, albumDiskInfo, *existingEntry, albumFileEntry)
-			if err != nil {
-				if errors.Is(err, model.ErrDecryption) {
-					continue
-				} else if existingEntry.IsLivePhoto() && errors.Is(err, zip.ErrFormat) {
-					log.Printf(fmt.Sprintf("err processing live photo %s (%d), %s", existingEntry.GetTitle(), existingEntry.ID, err.Error()))
-					continue
-				} else if existingEntry.IsLivePhoto() && errors.Is(err, model.ErrLiveZip) {
-					continue
-				} else if model.IsBadTimeStampError(err) {
-					log.Printf("Skipping file due to error %s (%d)", existingEntry.GetTitle(), existingEntry.ID)
-					log.Printf("CreationTime %v, ModidicationTime %v", existingEntry.GetCreationTime(), existingEntry.GetModificationTime())
-					continue
-				} else {
-					return err
-				}
-			}
-		} else {
+		if fileBytes == nil {
 			// file metadata is missing in the localDB
 			if albumFileEntry.IsDeleted {
 				delErr := c.DeleteAlbumEntry(ctx, albumFileEntry)
@@ -107,10 +91,39 @@ func (c *ClICtrl) syncFiles(ctx context.Context, account model.Account) error {
 			} else {
 				log.Fatalf("Failed to find entry in db for file %d (deleted: %v)", albumFileEntry.FileID, albumFileEntry.IsDeleted)
 			}
+			continue
 		}
+
+		var existingEntry *model.RemoteFile
+		err = json.Unmarshal(fileBytes, &existingEntry)
+		if err != nil {
+			return err
+		}
+
+		eg.Go(func() error {
+			log.Printf("[%d/%d] Sync %s for album %s", i, len(entries), existingEntry.GetTitle(), albumInfo.AlbumName)
+			err := c.downloadEntry(egCtx, albumDiskInfo, *existingEntry, albumFileEntry)
+			if err != nil {
+				if errors.Is(err, model.ErrDecryption) {
+					return nil
+				} else if existingEntry.IsLivePhoto() && errors.Is(err, zip.ErrFormat) {
+					log.Printf("err processing live photo %s (%d), %s", existingEntry.GetTitle(), existingEntry.ID, err.Error())
+					return nil
+				} else if existingEntry.IsLivePhoto() && errors.Is(err, model.ErrLiveZip) {
+					return nil
+				} else if model.IsBadTimeStampError(err) {
+					log.Printf("Skipping file due to error %s (%d)", existingEntry.GetTitle(), existingEntry.ID)
+					log.Printf("CreationTime %v, ModidicationTime %v", existingEntry.GetCreationTime(), existingEntry.GetModificationTime())
+					return nil
+				} else {
+					return err
+				}
+			}
+			return nil
+		})
 	}
 
-	return nil
+	return eg.Wait()
 }
 
 func (c *ClICtrl) downloadEntry(ctx context.Context,

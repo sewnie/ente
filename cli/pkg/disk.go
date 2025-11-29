@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 )
 
 const (
@@ -23,20 +24,32 @@ type albumDiskInfo struct {
 	FileNames                 *map[string]bool
 	MetaFileNameToDiskFileMap *map[string]*export.DiskFileMetadata
 	FileIdToDiskFileMap       *map[int64]*export.DiskFileMetadata
+	mu                        sync.Mutex
 }
 
 func (a *albumDiskInfo) IsFilePresent(file model.RemoteFile) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	// check if file.ID is present
 	_, ok := (*a.FileIdToDiskFileMap)[file.ID]
 	return ok
 }
 
-func (a *albumDiskInfo) IsFileNamePresent(fileName string) bool {
+func (a *albumDiskInfo) isFileNamePresent(fileName string) bool {
 	_, ok := (*a.FileNames)[strings.ToLower(fileName)]
 	return ok
 }
 
+func (a *albumDiskInfo) IsFileNamePresent(fileName string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.isFileNamePresent(fileName)
+}
+
+
 func (a *albumDiskInfo) AddEntry(metadata *export.DiskFileMetadata) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if _, ok := (*a.FileIdToDiskFileMap)[metadata.Info.ID]; ok {
 		return errors.New("fileID already present")
 	}
@@ -55,6 +68,8 @@ func (a *albumDiskInfo) AddEntry(metadata *export.DiskFileMetadata) error {
 }
 
 func (a *albumDiskInfo) RemoveEntry(metadata *export.DiskFileMetadata) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if _, ok := (*a.FileIdToDiskFileMap)[metadata.Info.ID]; !ok {
 		return errors.New("fileID not present")
 	}
@@ -69,43 +84,58 @@ func (a *albumDiskInfo) RemoveEntry(metadata *export.DiskFileMetadata) error {
 	return nil
 }
 
-func (a *albumDiskInfo) IsMetaFileNamePresent(metaFileName string) bool {
+func (a *albumDiskInfo) isMetaFileNamePresent(metaFileName string) bool {
 	_, ok := (*a.MetaFileNameToDiskFileMap)[strings.ToLower(metaFileName)]
 	return ok
 }
 
+func (a *albumDiskInfo) IsMetaFileNamePresent(metaFileName string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.isMetaFileNamePresent(metaFileName)
+}
+
+
 // GenerateUniqueMetaFileName generates a unique metafile name.
 func (a *albumDiskInfo) GenerateUniqueMetaFileName(baseFileName, extension string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	potentialDiskFileName := fmt.Sprintf("%s%s.json", baseFileName, extension)
 	count := 1
-	for a.IsMetaFileNamePresent(potentialDiskFileName) {
-		// separate the file name and extension
+	for a.isMetaFileNamePresent(potentialDiskFileName) {
 		fileName := fmt.Sprintf("%s_%d", baseFileName, count)
 		potentialDiskFileName = fmt.Sprintf("%s%s.json", fileName, extension)
 		count++
-		if !a.IsMetaFileNamePresent(potentialDiskFileName) {
+		if !a.isMetaFileNamePresent(potentialDiskFileName) {
 			break
 		}
 	}
 	return potentialDiskFileName
 }
 
+
+
 // GenerateUniqueFileName generates a unique file name.
 func (a *albumDiskInfo) GenerateUniqueFileName(baseFileName, extension string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	fileName := fmt.Sprintf("%s%s", baseFileName, extension)
 	count := 1
-	for a.IsFileNamePresent(strings.ToLower(fileName)) {
-		// separate the file name and extension
+	for a.isFileNamePresent(strings.ToLower(fileName)) {
 		fileName = fmt.Sprintf("%s_%d%s", baseFileName, count, extension)
 		count++
-		if !a.IsFileNamePresent(strings.ToLower(fileName)) {
+		if !a.isFileNamePresent(strings.ToLower(fileName)) {
 			break
 		}
 	}
 	return fileName
 }
 
+
+
 func (a *albumDiskInfo) GetDiskFileMetadata(file model.RemoteFile) *export.DiskFileMetadata {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	// check if file.ID is present
 	diskFile, ok := (*a.FileIdToDiskFileMap)[file.ID]
 	if !ok {
